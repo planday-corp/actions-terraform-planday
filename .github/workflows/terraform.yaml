@@ -1,0 +1,252 @@
+name: "Terraform lint, format, init, validate, plan and apply"
+
+on:
+  workflow_call:
+    inputs:
+      terraform_version:
+        type: string
+        description: "Version of Terraform that will be used. If left empty, the version set in the 'required_version' setting will be used. Semver ranges are allowed. Example: '1.2.4', 'latest', '~1.1.0'"
+        required: false
+      terraform_workspace:
+        type: string
+        description: "Terraform workspace to select, if any"
+        required: false
+      terraform_init_extra_args:
+        type: string
+        description: "Extra arguments to pass to Terraform 'init' command"
+        required: false
+      terraform_fmt_extra_args:
+        type: string
+        description: "Extra arguments to pass to Terraform 'fmt' command"
+        required: false
+      terraform_validate_extra_args:
+        type: string
+        description: "Extra arguments to pass to Terraform 'validate' command"
+        required: false
+      terraform_plan_extra_args:
+        type: string
+        description: "Extra arguments to pass to Terraform 'plan' command"
+        required: false
+      terraform_apply_extra_args:
+        type: string
+        description: "Extra arguments to pass to Terraform 'apply' command"
+        required: false
+      tflint_version:
+        type: string
+        description: "Version of TFLint that will be used. Default is 'v0.41.0"
+        required: false
+        default: "v0.41.0"
+
+    secrets:
+      azure_client_id:
+        description: "The Client ID which should be used"
+        required: true
+      azure_tenant_id:
+        description: "The Tenant ID which should be used"
+        required: true
+      azure_subscription_id:
+        description: "The Subscription ID which should be used"
+        required: true
+
+jobs:
+  terraform:
+    name: "Terraform lint, format, init, validate, plan and apply"
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # This is required for requesting the OIDC JWT
+      contents: read  # This is required for actions/checkout
+      issues: read
+      pull-requests: write
+    env:
+      ARM_CLIENT_ID: ${{ secrets.azure_client_id }}
+      ARM_TENANT_ID: ${{ secrets.azure_tenant_id }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.azure_subscription_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Setup Terraform from the 'required_version'
+        if: "${{ inputs.terraform_version == '' }}"
+        uses: planday-corp/actions-setup-terraform@v1
+      
+      - name: Setup Terraform from the given version
+        if: "${{ inputs.terraform_version != '' }}"
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: 'Az CLI login'
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.azure_client_id }}
+          tenant-id: ${{ secrets.azure_tenant_id }}
+          subscription-id: ${{ secrets.azure_subscription_id }}
+
+      - name: Terraform Init
+        id: init
+        run: terraform init ${{ inputs.terraform_init_extra_args }}
+
+      - name: Terraform workspace select
+        if: "${{ inputs.terraform_workspace != '' }}"
+        id: workspace
+        run: terraform workspace select ${{ inputs.terraform_workspace }}
+
+      - uses: actions/cache@v2
+        name: Cache plugin dir
+        with:
+          path: ~/.tflint.d/plugins
+          key: ${{ runner.os }}-tflint-${{ hashFiles('.tflint.hcl') }}
+
+      - uses: terraform-linters/setup-tflint@v2
+        name: Setup TFLint
+        with:
+          tflint_version: ${{ inputs.tflint_version }}
+
+      - name: Init TFLint
+        run: tflint --init
+      
+      - name: Run TFLint
+        id: tflint
+        if: always()
+        run: tflint --module --format compact
+
+      - name: TFLint output
+        id: tflint_output
+        if: always()
+        run: |
+          echo 'TFLINT_OUTPUT<<TFLINT_OUTPUT_EOF' >> $GITHUB_ENV
+          tflint --module --force >> $GITHUB_ENV
+          echo 'TFLINT_OUTPUT_EOF' >> $GITHUB_ENV
+
+      - name: Terraform Format
+        id: fmt
+        if: always()
+        run: terraform fmt -check ${{ inputs.terraform_fmt_extra_args }}
+      
+      - name: Terraform Validate
+        id: validate
+        if: always()
+        run: terraform validate -no-color ${{ inputs.terraform_validate_extra_args }}
+
+      - name: Terraform Plan
+        id: plan
+        if: always() && github.event_name == 'pull_request'
+        shell: bash
+        run: terraform plan -no-color -input=false ${{ inputs.terraform_plan_extra_args }} | tee /tmp/plan
+      
+      # Remove some verbose outputs, we only care about the diff
+      - shell: bash
+        if: always() && github.event_name == 'pull_request'
+        run: sed -i -e '/Refreshing state.../d' -e '/Reading.../d' -e '/Read complete after/d' /tmp/plan
+
+      - shell: bash
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/plan >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+      
+      - shell: bash
+        id: plan_output
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          echo 'TFPLAN_OUTPUT<<TFPLAN_OUTPUT_EOF' >> $GITHUB_ENV
+          cat /tmp/plan >> $GITHUB_ENV
+          echo 'TFPLAN_OUTPUT_EOF' >> $GITHUB_ENV
+      
+      - name: Update Pull Request
+        uses: actions/github-script@v6
+        if: always() && github.event_name == 'pull_request'
+        env:
+          PLAN: "${{ env.TFPLAN_OUTPUT }}"
+          TFLINT: "${{ env.TFLINT_OUTPUT }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Retrieve existing bot comments for the PR
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            const botComment = comments.find(comment => {
+              return comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')
+            })
+
+            // Set the outcome formatting
+            function setOutcome(outcome) {
+              var symbol = outcome == "success" ? "✅" : "❌"
+              return '`' + outcome + '` ' + symbol
+            }
+            
+            // The 'terraform plan' output might be too long for GitHub
+            // (hard limit of 1MiB per job out and env variable)
+            var planOutput = ""
+            if (process.env.PLAN == "") {
+              planOutput = '**Terraform plan output cannot be displayed here (too long ?). Check out the job logs instead**'
+            } else {
+              planOutput = `\`\`\`\n
+            ${process.env.PLAN}
+              \`\`\``
+            }
+
+            
+            var tflintOutputRaw = process.env.TFLINT
+            var tflintOutput = ""
+
+            if ("${{ steps.tflint.outcome }}" == "success" && process.env.TFLINT == "") {
+              tflintOutput = '**No linter rules have been breached**'
+            } else {
+              tflintOutput = `\`\`\`\n
+            ${tflintOutputRaw}
+            \`\`\``
+            }
+
+            const output = `#### Terraform Format and Style 🖌 ` + setOutcome("${{ steps.fmt.outcome }}") + `
+            #### Terraform Initialization ⚙️ ` + setOutcome("${{ steps.init.outcome }}") + `
+            #### Terraform Plan 📖 ` + setOutcome("${{ steps.plan.outcome }}") + `
+            #### Terraform Validation 🤖 ` + setOutcome("${{ steps.validate.outcome }}") + `
+            #### TFLint 🚀 ` + setOutcome("${{ steps.tflint.outcome }}") + `
+
+            <details><summary>Show Plan</summary>
+
+            ${planOutput}
+
+            </details>
+
+            <details><summary>Show TFLint</summary>
+
+            ${tflintOutput}
+
+            </details>
+
+            *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            // If we have a comment, update it, otherwise create a new one
+            if (botComment) {
+              github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              })
+            } else {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              })
+            }
+
+      - name: TFLint Status
+        if: steps.tflint.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Status
+        if: steps.fmt.outcome == 'failure' || steps.init.outcome == 'failure' || steps.validate.outcome == 'failure' || steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: terraform apply -auto-approve -input=false ${{ inputs.terraform_apply_extra_args }}
