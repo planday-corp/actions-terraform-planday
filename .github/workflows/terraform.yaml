@@ -251,3 +251,41 @@ jobs:
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
         run: terraform apply -auto-approve -input=false ${{ inputs.terraform_apply_extra_args }}
+
+    
+  create-issue:
+    name: "If terraform fails, create issue"
+    permissions:
+      id-token: write # This is required for requesting the OIDC JWT
+      contents: read  # This is required for actions/checkout
+      issues: write      
+    runs-on: ubuntu-latest
+    if: ${{ failure()  }} # OR Check a bool variable you create and toggle as needed
+    needs: [terraform]
+    steps:
+    - uses: actions/checkout@v2
+    - runs: |
+        FILE=.github/terraform-issue.md
+        if test -f "$FILE"; then
+            echo "$FILE exists."
+        else
+          touch .github/terraform-issue.md
+          echo "---" >> .github/terraform-issue.md
+          echo "name: Terraform Failed" >> .github/terraform-issue.md
+          echo "title: Terraform job failed {{ date | date('dddd, MMMM Do') }}" >> .github/terraform-issue.md
+          echo "labels: terraform" >> .github/terraform-issue.md
+          echo "---" >> .github/terraform-issue.md
+          echo "terraform job failed" >> .github/terraform-issue.md
+          git add .github/terraform-issue.md
+          git commit -m "[skip ci] added terraform issue template"
+          git push
+        fi
+
+    - uses: JasonEtco/create-an-issue@v2
+      with:
+        filename: .github/terraform-issue.md
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      id: create-issue
+    - run: 'echo Created issue number ${{ steps.create-issue.outputs.number }}'
+    - run: 'echo Created ${{ steps.create-issue.outputs.url }}'
