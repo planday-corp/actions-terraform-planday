@@ -251,20 +251,17 @@ jobs:
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
         run: terraform apply -auto-approve -input=false ${{ inputs.terraform_apply_extra_args }}
-
-    
   create-issue:
+    needs: [terraform]
+    if: ${{ failure()  }} # OR Check a bool variable you create and toggle as needed
     name: "If terraform fails, create issue"
     permissions:
-      id-token: write # This is required for requesting the OIDC JWT
       contents: read  # This is required for actions/checkout
       issues: write      
     runs-on: ubuntu-latest
-    if: ${{ failure()  }} # OR Check a bool variable you create and toggle as needed
-    needs: [terraform]
     steps:
     - uses: actions/checkout@v2
-    - runs: |
+    - run: |
         FILE=.github/terraform-issue.md
         if test -f "$FILE"; then
             echo "$FILE exists."
