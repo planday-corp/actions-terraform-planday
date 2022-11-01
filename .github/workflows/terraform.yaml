@@ -273,7 +273,7 @@ jobs:
           echo "labels: terraform" >> .github/terraform-issue.md
           echo "---" >> .github/terraform-issue.md
           echo "terraform job failed" >> .github/terraform-issue.md
-          git config --global user.email "platformSA@planday.com"
+          git config --global user.email "no-reply@planday.com"
           git config --global user.name "Platform Service"
           git add .github/terraform-issue.md
           git commit -m "[skip ci] added terraform issue template"
