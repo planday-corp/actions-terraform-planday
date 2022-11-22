@@ -253,7 +253,7 @@ jobs:
         run: terraform apply -auto-approve -input=false ${{ inputs.terraform_apply_extra_args }}
   create-issue:
     needs: [terraform]
-    if: ${{ failure()  }} # OR Check a bool variable you create and toggle as needed
+    if: ${{ failure() && github.event_name != 'pull_request' }} # OR Check a bool variable you create and toggle as needed
     name: "If terraform fails, create issue"
     permissions:
       contents: write  # This is required for actions/checkout
